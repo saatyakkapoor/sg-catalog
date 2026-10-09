@@ -1,0 +1,26 @@
+# Firebase App Hosting — Shagun Digital catalogue
+runConfig:
+  cpu: 1
+  memoryMiB: 1024
+  minInstances: 0
+  maxInstances: 2
+  concurrency: 20
+
+env:
+  - variable: DATABASE_URL
+    value: file:./prisma/dev.db
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: ADMIN_EMAIL
+    value: admin@sgcatalog.local
+    availability:
+      - RUNTIME
+  - variable: ADMIN_NAME
+    value: Shagun
+    availability:
+      - RUNTIME
+  - variable: AUTH_SECRET
+    value: replace-with-a-long-random-string
+    availability:
+      - RUNTIME

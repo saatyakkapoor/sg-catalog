@@ -1,0 +1,147 @@
+rules_version = '2';
+
+// Static Hosting admin: email/password Auth + mandatory TOTP (admins/{email}).
+// Cron / seed scripts use the Admin SDK (bypasses these rules).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function emailLower() {
+      return request.auth.token.email.lower();
+    }
+
+    function adminData() {
+      return get(/databases/$(database)/documents/admins/$(emailLower())).data;
+    }
+
+    function isAdmin() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/admins/$(emailLower())) &&
+        adminData().active != false;
+    }
+
+    function isSuperAdmin() {
+      return isAdmin() && adminData().role == 'super';
+    }
+
+    function isShagunAdmin() {
+      return signedIn() && emailLower() == 'admin@sgcatalog.local';
+    }
+
+    match /admins/{emailId} {
+      allow read: if isAdmin() && (emailLower() == emailId || isSuperAdmin());
+      allow create: if isSuperAdmin()
+        && request.resource.data.email == emailId
+        && request.resource.data.role == 'admin';
+      allow update: if isSuperAdmin()
+        || (isAdmin()
+          && emailLower() == emailId
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.active == resource.data.active);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /system/{docId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin()
+        && docId == 'pendingJobs'
+        && request.resource.data.hasQueued == true;
+      allow delete: if false;
+    }
+
+    match /shares/{slug} {
+      allow read: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /pendingShares/{slug} {
+      allow read, write: if isAdmin();
+    }
+
+    match /homepage/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /categories/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /contacts/{id} {
+      allow create: if
+        request.resource.data.keys().hasAll([
+          'full_name', 'email', 'phone', 'subject', 'source', 'message', 'status', 'created_at'
+        ])
+        && request.resource.data.status == 'new'
+        && request.resource.data.full_name is string
+        && request.resource.data.email is string
+        && request.resource.data.message is string
+        && request.resource.data.full_name.size() > 0
+        && request.resource.data.email.size() > 3
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() < 5000;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /leads/{id} {
+      allow create: if
+        request.resource.data.keys().hasAll([
+          'name', 'email', 'phone', 'quantity', 'message', 'type',
+          'share_name', 'status', 'created_at'
+        ])
+        && request.resource.data.status == 'new'
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.phone is string
+        && request.resource.data.type is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.email.size() > 3
+        && request.resource.data.phone.size() >= 8
+        && request.resource.data.message.size() < 5000;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read: if isAdmin() || (signedIn() && emailLower() == userId);
+      allow create, update: if signedIn() && emailLower() == userId;
+      allow delete: if isAdmin();
+
+      match /holdings/{holdingId} {
+        allow read, write: if (signedIn() && emailLower() == userId) || isAdmin();
+      }
+    }
+
+    match /adminJobs/{id} {
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['type', 'status', 'created_at'])
+        && request.resource.data.status == 'queued';
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    match /sg_settings/{id} {
+      allow read: if true;
+      allow write: if isShagunAdmin();
+    }
+    match /sg_categories/{id} {
+      allow read: if true;
+      allow write: if isShagunAdmin();
+    }
+    match /sg_products/{id} {
+      allow read: if true;
+      allow create, update, delete: if isShagunAdmin();
+    }
+    match /sg_media/{id} {
+      allow read: if true;
+      allow write: if isShagunAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

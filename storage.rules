@@ -1,0 +1,18 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Watermarked catalog images — anyone can view, only the server can write.
+    match /public/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Private originals and the SQLite snapshot — admin SDK only.
+    match /originals/{allPaths=**} {
+      allow read, write: if false;
+    }
+    match /data/{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
