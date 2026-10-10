@@ -4,6 +4,7 @@
  */
 
 export type MediaVariants = {
+  original?: string;
   detail?: string;
   card?: string;
   thumb?: string;
@@ -31,8 +32,9 @@ export function parseVariants(raw: string | null | undefined): MediaVariants {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object") return {};
-    const { detail, card, thumb } = parsed as Record<string, unknown>;
+    const { original, detail, card, thumb } = parsed as Record<string, unknown>;
     return {
+      original: typeof original === "string" ? original : undefined,
       detail: typeof detail === "string" ? detail : undefined,
       card: typeof card === "string" ? card : undefined,
       thumb: typeof thumb === "string" ? thumb : undefined,
@@ -80,12 +82,12 @@ export function mediaSrc(
 ): string | null {
   if (!media) return null;
   const variants = parseVariants(media.variants);
-  const order: MediaSize[] =
+  const order: Array<keyof MediaVariants> =
     size === "thumb"
-      ? ["thumb", "card", "detail"]
+      ? ["thumb", "card", "detail", "original"]
       : size === "card"
-        ? ["card", "detail", "thumb"]
-        : ["detail", "card", "thumb"];
+        ? ["card", "detail", "original", "thumb"]
+        : ["detail", "card", "original", "thumb"];
 
   for (const key of order) {
     const value = variants[key];

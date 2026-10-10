@@ -1,9 +1,6 @@
-/** Display an admin-entered design number the way the catalogue labels it. */
+/** Display the design number exactly as the administrator entered it. */
 export function formatDesignLabel(raw: string): string {
-  const cleaned = raw.trim();
-  if (!cleaned) return "";
-  const withoutPrefix = cleaned.replace(/^sd[\s._-]*/i, "");
-  return `SD ${withoutPrefix}`;
+  return raw.trim();
 }
 
 export function designNumberValue(raw: string): number | null {

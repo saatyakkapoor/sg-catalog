@@ -7,21 +7,30 @@ import { SearchBox } from "@/components/public/search-box";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { MenuIcon, SearchIcon, WhatsAppIcon, XIcon } from "@/components/icons";
 
-const LINKS = [
-  { href: "/", label: "Home" },
-  { href: "/catalog", label: "Catalog" },
-  { href: "/contact", label: "Contact" },
-] as const;
-
 export function SiteHeader({
   businessName,
+  logoSrc,
   whatsappHref,
+  catalogLabel = "Catalog",
+  contactLabel = "Contact",
+  enquireLabel = "Enquire",
+  categories = [],
 }: {
   businessName: string;
   tagline?: string | null;
   logoSrc?: string | null;
   whatsappHref: string | null;
+  catalogLabel?: string;
+  contactLabel?: string;
+  enquireLabel?: string;
+  categories?: Array<{ href: string; label: string }>;
 }) {
+  const links = [
+    { href: "/", label: "Home" },
+    { href: "/catalog", label: catalogLabel },
+    ...categories.slice(0, 6).map((item) => ({ href: item.href, label: item.label })),
+    { href: "/contact", label: contactLabel },
+  ];
   const pathname = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -37,7 +46,7 @@ export function SiteHeader({
       <div className="mx-auto flex h-16 max-w-[1400px] items-center gap-3 px-5 sm:h-[72px]">
         <Link href="/" className="flex min-w-0 items-center">
           <img
-            src="/brand/logo.png"
+            src={logoSrc ?? "/brand/logo.png"}
             alt={businessName}
             className="h-9 w-auto sm:h-10"
           />
@@ -55,7 +64,7 @@ export function SiteHeader({
               Designs
             </a>
           ) : null}
-          {LINKS.map((link) => (
+          {links.map((link) => (
             <Link
               key={link.href}
               href={link.href}
@@ -95,7 +104,7 @@ export function SiteHeader({
               aria-label="Enquire on WhatsApp"
             >
               <WhatsAppIcon className="h-[18px] w-[18px]" />
-              <span className="hidden sm:inline">Enquire</span>
+              <span className="hidden sm:inline">{enquireLabel}</span>
             </a>
           ) : null}
 
@@ -147,7 +156,7 @@ export function SiteHeader({
                   Designs
                 </a>
               ) : null}
-              {LINKS.map((link) => (
+              {links.map((link) => (
                 <Link
                   key={link.href}
                   href={link.href}

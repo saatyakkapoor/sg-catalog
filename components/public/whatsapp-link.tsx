@@ -42,7 +42,13 @@ export function WhatsAppLink({
 }
 
 /** Fixed bottom-right enquiry button, present on every public page. */
-export function FloatingWhatsApp({ href }: { href: string | null }) {
+export function FloatingWhatsApp({
+  href,
+  label = "Chat on WhatsApp",
+}: {
+  href: string | null;
+  label?: string;
+}) {
   if (!href) return null;
 
   return (
@@ -54,7 +60,7 @@ export function FloatingWhatsApp({ href }: { href: string | null }) {
       aria-label="Chat with us on WhatsApp"
     >
       <WhatsAppIcon className="h-6 w-6" />
-      <span className="hidden sm:inline">Chat on WhatsApp</span>
+      <span className="hidden sm:inline">{label}</span>
     </a>
   );
 }

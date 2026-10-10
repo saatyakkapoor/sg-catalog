@@ -46,24 +46,4 @@ export function watermarkSettingsFrom(settings: SiteSettings): WatermarkSettings
   };
 }
 
-export type SocialLink = { label: string; url: string };
-
-export function socialLinksFrom(settings: SiteSettings): SocialLink[] {
-  const candidates: Array<{ label: string; url: string | null }> = [
-    { label: "Instagram", url: settings.instagramUrl },
-    { label: "Facebook", url: settings.facebookUrl },
-    { label: "YouTube", url: settings.youtubeUrl },
-    { label: "X", url: settings.twitterUrl },
-    { label: "LinkedIn", url: settings.linkedinUrl },
-  ];
-
-  return candidates.flatMap(({ label, url }) =>
-    url && url.trim() ? [{ label, url: url.trim() }] : []
-  );
-}
-
-export function siteUrl(): string {
-  const raw = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (!raw) return "http://localhost:3000";
-  return raw.replace(/\/+$/, "");
-}
+export { socialLinksFrom, siteUrl, type SocialLink } from "@/lib/site-public";

@@ -12,6 +12,7 @@ export function generateStaticParams() {
     { path: ["categories", "new"] },
     { path: ["media"] },
     { path: ["settings"] },
+    { path: ["account"] },
   ];
 }
 

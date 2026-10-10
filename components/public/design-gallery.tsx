@@ -121,7 +121,7 @@ export function DesignGallery({
           </p>
         </div>
         <p className="mb-6 text-sm text-ink-400">
-          Tap a design to zoom. Tap + to add it to your WhatsApp enquiry.
+          Tap a design to zoom. Tap + to add it to your WhatsApp enquiry. Search by design number.
         </p>
 
         {visible.length === 0 ? (

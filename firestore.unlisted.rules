@@ -139,6 +139,9 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isShagunAdmin();
     }
+    match /sg_audit/{id} {
+      allow read, write: if isShagunAdmin();
+    }
 
     match /{document=**} {
       allow read, write: if false;

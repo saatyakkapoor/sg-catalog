@@ -23,16 +23,43 @@ export type RemoteMedia = MediaLike & {
   createdAt?: string;
 };
 
+export type CatalogKind = "category" | "brand" | "model";
+
+export type WatermarkOverride = {
+  inherit: boolean;
+  enabled: boolean;
+  logoId: string | null;
+  logo?: RemoteMedia | null;
+  opacity?: number;
+  scale?: number;
+  spacing?: number;
+  rotation?: number;
+};
+
 export type RemoteCategory = {
   id: string;
   name: string;
   slug: string;
   description: string | null;
+  parentId: string | null;
+  kind: CatalogKind;
   imageId: string | null;
+  logoId: string | null;
   image: RemoteMedia | null;
+  logo: RemoteMedia | null;
   sortOrder: number;
   isPublished: boolean;
   productCount: number;
+  seoTitle: string | null;
+  seoDescription: string | null;
+  watermarkInherit: boolean;
+  watermarkEnabled: boolean;
+  watermarkLogoId: string | null;
+  watermarkLogo: RemoteMedia | null;
+  watermarkOpacity: number | null;
+  watermarkScale: number | null;
+  watermarkSpacing: number | null;
+  watermarkRotation: number | null;
 };
 
 export type RemoteProduct = {
@@ -42,16 +69,24 @@ export type RemoteProduct = {
   slug: string;
   description: string | null;
   tags: string[];
+  sizes: string[];
   specs: Array<{ label: string; value: string }>;
   categoryId: string | null;
   categoryName: string | null;
   categorySlug: string | null;
+  brandName: string | null;
+  modelName: string | null;
   sortOrder: number;
   isPublished: boolean;
   createdAt: string;
   imageIds: string[];
   images: RemoteMedia[];
   coverUrl: string | null;
+  originalCoverUrl: string | null;
+  watermarkStatus: "none" | "ready" | "pending" | "error";
+  watermarkError: string | null;
+  watermarkRevision: string | null;
+  watermarkOverride: WatermarkOverride | null;
 };
 
 export type RemoteSettings = {
@@ -60,6 +95,7 @@ export type RemoteSettings = {
   tagline: string | null;
   logoId: string | null;
   logo: RemoteMedia | null;
+  faviconId: string | null;
   address: string | null;
   phone: string | null;
   email: string | null;
@@ -67,6 +103,7 @@ export type RemoteSettings = {
   whatsappNumber: string;
   whatsappGeneralMessage: string;
   whatsappProductMessage: string;
+  enquiryButtonLabel: string;
   mapEmbedUrl: string | null;
   mapLink: string | null;
   latitude: number | null;
@@ -81,11 +118,25 @@ export type RemoteSettings = {
   watermarkLogo: RemoteMedia | null;
   watermarkOpacity: number;
   watermarkScale: number;
+  watermarkSpacing: number;
   watermarkRotation: number;
   watermarkRepetitions: number;
+  watermarkRevision: string;
   siteTitle: string;
   siteDescription: string;
+  homepageHeading: string;
+  homepageIntro: string;
+  aboutText: string;
+  navCatalogLabel: string;
+  navContactLabel: string;
   defaultSort: string;
+};
+
+export type AuditEntry = {
+  id: string;
+  at: string;
+  action: string;
+  detail: string;
 };
 
 function db() {
@@ -175,6 +226,7 @@ export async function saveMedia(media: RemoteMedia & { originalData?: string | n
     bytes: media.bytes,
     variants: media.variants,
     alt: media.alt ?? null,
+    originalData: media.originalData ?? null,
     createdAt: media.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
@@ -204,16 +256,33 @@ export async function listCategories(publishedOnly = false): Promise<RemoteCateg
     .map((item) => {
       const data = asRecord(item.data());
       const imageId = str(data.imageId) || null;
+      const logoId = str(data.logoId) || null;
+      const watermarkLogoId = str(data.watermarkLogoId) || null;
+      const kind = str(data.kind);
       return {
         id: item.id,
         name: str(data.name),
         slug: str(data.slug),
         description: str(data.description) || null,
+        parentId: str(data.parentId) || null,
+        kind: (kind === "brand" || kind === "model" ? kind : "category") as CatalogKind,
         imageId,
+        logoId,
         image: imageId ? mediaMap.get(imageId) ?? null : null,
+        logo: logoId ? mediaMap.get(logoId) ?? null : null,
         sortOrder: num(data.sortOrder),
         isPublished: bool(data.isPublished, true),
         productCount: counts.get(item.id) ?? 0,
+        seoTitle: str(data.seoTitle) || null,
+        seoDescription: str(data.seoDescription) || null,
+        watermarkInherit: bool(data.watermarkInherit, true),
+        watermarkEnabled: bool(data.watermarkEnabled, true),
+        watermarkLogoId,
+        watermarkLogo: watermarkLogoId ? mediaMap.get(watermarkLogoId) ?? null : null,
+        watermarkOpacity: typeof data.watermarkOpacity === "number" ? data.watermarkOpacity : null,
+        watermarkScale: typeof data.watermarkScale === "number" ? data.watermarkScale : null,
+        watermarkSpacing: typeof data.watermarkSpacing === "number" ? data.watermarkSpacing : null,
+        watermarkRotation: typeof data.watermarkRotation === "number" ? data.watermarkRotation : null,
       };
     })
     .filter((item) => (publishedOnly ? item.isPublished : true))
@@ -225,12 +294,28 @@ export async function saveCategory(input: {
   name: string;
   slug?: string;
   description?: string;
-  imageId?: string;
+  parentId?: string | null;
+  kind?: CatalogKind;
+  imageId?: string | null;
+  logoId?: string | null;
   isPublished: boolean;
+  seoTitle?: string;
+  seoDescription?: string;
+  sortOrder?: number;
+  watermarkInherit?: boolean;
+  watermarkEnabled?: boolean;
+  watermarkLogoId?: string | null;
+  watermarkOpacity?: number | null;
+  watermarkScale?: number | null;
+  watermarkSpacing?: number | null;
+  watermarkRotation?: number | null;
 }): Promise<RemoteCategory> {
   const existing = await listCategories();
   const id = input.id ?? newId("cat");
   const current = existing.find((item) => item.id === id);
+  if (input.parentId && input.parentId === id) {
+    throw new Error("A collection cannot be nested under itself.");
+  }
   const slug = await uniqueSlug(slugify(input.slug || input.name), async (candidate) =>
     existing.some((item) => item.slug === candidate && item.id !== id)
   );
@@ -238,18 +323,27 @@ export async function saveCategory(input: {
     name: input.name.trim(),
     slug,
     description: input.description?.trim() || null,
-    imageId: input.imageId || null,
+    parentId: input.parentId || null,
+    kind: input.kind ?? current?.kind ?? "category",
+    imageId: input.imageId ?? current?.imageId ?? null,
+    logoId: input.logoId ?? current?.logoId ?? null,
     isPublished: input.isPublished,
-    sortOrder: current?.sortOrder ?? existing.length + 1,
+    seoTitle: input.seoTitle?.trim() || null,
+    seoDescription: input.seoDescription?.trim() || null,
+    sortOrder: input.sortOrder ?? current?.sortOrder ?? existing.length + 1,
+    watermarkInherit: input.watermarkInherit ?? current?.watermarkInherit ?? true,
+    watermarkEnabled: input.watermarkEnabled ?? current?.watermarkEnabled ?? true,
+    watermarkLogoId: input.watermarkLogoId ?? current?.watermarkLogoId ?? null,
+    watermarkOpacity: input.watermarkOpacity ?? current?.watermarkOpacity ?? null,
+    watermarkScale: input.watermarkScale ?? current?.watermarkScale ?? null,
+    watermarkSpacing: input.watermarkSpacing ?? current?.watermarkSpacing ?? null,
+    watermarkRotation: input.watermarkRotation ?? current?.watermarkRotation ?? null,
   };
   await setDoc(doc(db(), "sg_categories", id), record, { merge: true });
-  const image = record.imageId ? await getMedia(record.imageId) : null;
-  return {
-    id,
-    ...record,
-    image,
-    productCount: current?.productCount ?? 0,
-  };
+  await logAudit("catalogue", `${record.kind} “${record.name}” saved`);
+  const saved = (await listCategories()).find((item) => item.id === id);
+  if (!saved) throw new Error("Could not save the collection.");
+  return saved;
 }
 
 export async function deleteCategory(
@@ -257,7 +351,14 @@ export async function deleteCategory(
   strategy: "move" | "deleteProducts" | "unassign",
   targetCategoryId?: string
 ): Promise<void> {
-  const products = await listProducts({ includeHidden: true });
+  const [products, categories] = await Promise.all([
+    listProducts({ includeHidden: true }),
+    listCategories(),
+  ]);
+  const children = categories.filter((item) => item.parentId === id);
+  if (children.length > 0) {
+    throw new Error("Move or delete nested collections first. Products under this item were not changed.");
+  }
   const owned = products.filter((product) => product.categoryId === id);
   if (strategy === "move" && targetCategoryId) {
     await Promise.all(
@@ -269,6 +370,31 @@ export async function deleteCategory(
     await Promise.all(owned.map((product) => updateDoc(doc(db(), "sg_products", product.id), { categoryId: null })));
   }
   await deleteDoc(doc(db(), "sg_categories", id));
+  await logAudit("catalogue", `Collection deleted (${owned.length} product(s) ${strategy})`);
+}
+
+export async function logAudit(action: string, detail: string): Promise<void> {
+  try {
+    const id = newId("log");
+    await setDoc(doc(db(), "sg_audit", id), {
+      at: new Date().toISOString(),
+      action,
+      detail,
+    });
+  } catch {
+    // Audit is best-effort and must not block saving products or settings.
+  }
+}
+
+export async function listAudit(limit = 8): Promise<AuditEntry[]> {
+  const snap = await getDocs(collection(db(), "sg_audit"));
+  return snap.docs
+    .map((item) => {
+      const data = asRecord(item.data());
+      return { id: item.id, at: str(data.at), action: str(data.action), detail: str(data.detail) };
+    })
+    .sort((a, b) => b.at.localeCompare(a.at))
+    .slice(0, limit);
 }
 
 function productsFromSnaps(
@@ -302,33 +428,122 @@ function productsFromSnaps(
       );
       const category = categoryMap.get(str(data.categoryId));
       const publishedCategory = category?.isPublished ? category : null;
+      const sizes = parseJsonArray(data.sizes ?? data.tags, (tag) =>
+        typeof tag === "string" && tag.trim() ? tag.trim() : null
+      );
+      const overrideRaw = asRecord(data.watermarkOverride);
       return {
         id: item.id,
         designNumber: str(data.designNumber),
-        name: str(data.name),
+        name: str(data.name) || str(data.designNumber),
         slug: str(data.slug),
         description: str(data.description) || null,
         tags: parseJsonArray(data.tags, (tag) => (typeof tag === "string" ? tag : null)),
+        sizes,
         specs: parseJsonArray(data.specs, (entry) => {
           const rec = asRecord(entry);
           return str(rec.label) && str(rec.value) ? { label: str(rec.label), value: str(rec.value) } : null;
         }),
         categoryId: str(data.categoryId) || null,
-        categoryName: publishedCategory?.name ?? null,
-        categorySlug: publishedCategory?.slug ?? null,
+        categoryName: publishedCategory?.name ?? (str(data.categoryName) || null),
+        categorySlug: publishedCategory?.slug ?? (str(data.categorySlug) || null),
+        brandName: str(data.brandName) || null,
+        modelName: str(data.modelName) || null,
         sortOrder: num(data.sortOrder),
         isPublished: bool(data.isPublished, true),
         createdAt: str(data.createdAt) || "",
         imageIds,
         images: imageIds.map((id) => mediaMap.get(id)).filter((item): item is RemoteMedia => Boolean(item)),
         coverUrl: str(data.coverUrl) || null,
+        originalCoverUrl: str(data.originalCoverUrl) || null,
+        watermarkStatus: (
+          data.watermarkStatus === "ready" ||
+          data.watermarkStatus === "pending" ||
+          data.watermarkStatus === "error"
+            ? data.watermarkStatus
+            : "none"
+        ) as RemoteProduct["watermarkStatus"],
+        watermarkError: str(data.watermarkError) || null,
+        watermarkRevision: str(data.watermarkRevision) || null,
+        watermarkOverride: Object.keys(overrideRaw).length
+          ? {
+              inherit: bool(overrideRaw.inherit, true),
+              enabled: bool(overrideRaw.enabled, true),
+              logoId: str(overrideRaw.logoId) || null,
+              opacity: typeof overrideRaw.opacity === "number" ? overrideRaw.opacity : undefined,
+              scale: typeof overrideRaw.scale === "number" ? overrideRaw.scale : undefined,
+              spacing: typeof overrideRaw.spacing === "number" ? overrideRaw.spacing : undefined,
+              rotation: typeof overrideRaw.rotation === "number" ? overrideRaw.rotation : undefined,
+            }
+          : null,
       };
     })
     .filter((product) => (options?.includeHidden ? true : product.isPublished))
-    .filter((product) =>
-      options?.categorySlug ? product.categorySlug === options.categorySlug : true
-    )
     .sort((a, b) => a.sortOrder - b.sortOrder || a.designNumber.localeCompare(b.designNumber, undefined, { numeric: true }));
+}
+
+function nodesFromSnap(categorySnap: QuerySnapshot | null): RemoteCategory[] {
+  return (categorySnap?.docs ?? []).map((item) => {
+    const data = asRecord(item.data());
+    const kind = str(data.kind);
+    return {
+      id: item.id,
+      name: str(data.name),
+      slug: str(data.slug),
+      description: str(data.description) || null,
+      parentId: str(data.parentId) || null,
+      kind: (kind === "brand" || kind === "model" ? kind : "category") as CatalogKind,
+      imageId: str(data.imageId) || null,
+      logoId: str(data.logoId) || null,
+      image: null,
+      logo: null,
+      sortOrder: num(data.sortOrder),
+      isPublished: bool(data.isPublished, true),
+      productCount: 0,
+      seoTitle: null,
+      seoDescription: null,
+      watermarkInherit: bool(data.watermarkInherit, true),
+      watermarkEnabled: bool(data.watermarkEnabled, true),
+      watermarkLogoId: str(data.watermarkLogoId) || null,
+      watermarkLogo: null,
+      watermarkOpacity: typeof data.watermarkOpacity === "number" ? data.watermarkOpacity : null,
+      watermarkScale: typeof data.watermarkScale === "number" ? data.watermarkScale : null,
+      watermarkSpacing: typeof data.watermarkSpacing === "number" ? data.watermarkSpacing : null,
+      watermarkRotation: typeof data.watermarkRotation === "number" ? data.watermarkRotation : null,
+    };
+  });
+}
+
+function matchesCategorySlug(
+  product: RemoteProduct,
+  slug: string | undefined,
+  categories: RemoteCategory[]
+): boolean {
+  if (!slug) return true;
+  if (product.categorySlug === slug) return true;
+  const byId = new Map(categories.map((item) => [item.id, item]));
+  const target = categories.find((item) => item.slug === slug);
+  if (!target) return false;
+  const ids = new Set<string>([target.id]);
+  const stack = [target.id];
+  while (stack.length) {
+    const current = stack.pop()!;
+    for (const child of categories) {
+      if (child.parentId === current && !ids.has(child.id)) {
+        ids.add(child.id);
+        stack.push(child.id);
+      }
+    }
+  }
+  if (product.categoryId && ids.has(product.categoryId)) return true;
+  let walk = product.categoryId ? byId.get(product.categoryId) : undefined;
+  const seen = new Set<string>();
+  while (walk && !seen.has(walk.id)) {
+    seen.add(walk.id);
+    if (ids.has(walk.id)) return true;
+    walk = walk.parentId ? byId.get(walk.parentId) : undefined;
+  }
+  return false;
 }
 
 function productsRef(includeHidden?: boolean): Query {
@@ -345,7 +560,37 @@ export async function listProducts(options?: {
     getDocs(collection(db(), "sg_categories")),
     getDocs(collection(db(), "sg_media")),
   ]);
-  return productsFromSnaps(productSnap, categorySnap, mediaSnap, options);
+  const nodes = nodesFromSnap(categorySnap);
+  const products = decorateProducts(
+    productsFromSnaps(productSnap, categorySnap, mediaSnap, options),
+    nodes
+  );
+  return products.filter((product) => matchesCategorySlug(product, options?.categorySlug, nodes));
+}
+
+function decorateProducts(products: RemoteProduct[], categories: RemoteCategory[]): RemoteProduct[] {
+  const byId = new Map(categories.map((item) => [item.id, item]));
+  return products.map((product) => {
+    const chain: RemoteCategory[] = [];
+    const seen = new Set<string>();
+    let current = product.categoryId ? byId.get(product.categoryId) : undefined;
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      chain.unshift(current);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    const published = chain.filter((item) => item.isPublished);
+    const brand = [...published].reverse().find((item) => item.kind === "brand");
+    const model = [...published].reverse().find((item) => item.kind === "model");
+    const leaf = published[published.length - 1] ?? null;
+    return {
+      ...product,
+      categoryName: leaf?.name ?? product.categoryName,
+      categorySlug: leaf?.slug ?? product.categorySlug,
+      brandName: brand?.name ?? product.brandName,
+      modelName: model?.name ?? product.modelName,
+    };
+  });
 }
 
 export function subscribeProducts(
@@ -359,14 +604,12 @@ export function subscribeProducts(
 
   const emit = () => {
     if (!productSnap) return;
-    onChange(
-      productsFromSnaps(
-        productSnap,
-        categorySnap,
-        mediaSnap,
-        options
-      )
+    const nodes = nodesFromSnap(categorySnap);
+    const products = decorateProducts(
+      productsFromSnaps(productSnap, categorySnap, mediaSnap, options),
+      nodes
     );
+    onChange(products.filter((product) => matchesCategorySlug(product, options?.categorySlug, nodes)));
   };
 
   const handleError = (error: Error) => {
@@ -413,47 +656,57 @@ export async function getProductBySlug(slug: string): Promise<RemoteProduct | nu
 export async function saveProduct(input: {
   id?: string;
   designNumber: string;
-  name: string;
+  name?: string;
   description?: string;
   categoryId?: string;
-  tags: string[];
-  specs: Array<{ label: string; value: string }>;
+  sizes?: string[];
+  specs?: Array<{ label: string; value: string }>;
   imageIds: string[];
   isPublished: boolean;
   coverUrl?: string | null;
+  originalCoverUrl?: string | null;
+  watermarkStatus?: RemoteProduct["watermarkStatus"];
+  watermarkError?: string | null;
+  watermarkRevision?: string | null;
+  watermarkOverride?: WatermarkOverride | null;
 }): Promise<RemoteProduct> {
   const products = await listProducts({ includeHidden: true });
   const id = input.id ?? newId("prd");
   const current = products.find((item) => item.id === id);
-  if (
-    products.some(
-      (item) => item.designNumber === input.designNumber.trim() && item.id !== id
-    )
-  ) {
-    throw new Error(`Design No. ${input.designNumber} is already used.`);
+  const designNumber = input.designNumber.trim();
+  if (!designNumber) throw new Error("Enter a design number.");
+  if (products.some((item) => item.designNumber === designNumber && item.id !== id)) {
+    throw new Error(`Design ${designNumber} is already used.`);
   }
   const slug =
-    current && current.designNumber === input.designNumber.trim()
+    current && current.designNumber === designNumber
       ? current.slug
-      : await uniqueSlug(productSlug(input.designNumber, input.name), async (candidate) =>
+      : await uniqueSlug(productSlug(designNumber, designNumber), async (candidate) =>
           products.some((item) => item.slug === candidate && item.id !== id)
         );
 
   const record = {
-    designNumber: input.designNumber.trim(),
-    name: input.name.trim(),
+    designNumber,
+    name: designNumber,
     slug,
     description: input.description?.trim() || null,
     categoryId: input.categoryId || null,
-    tags: input.tags,
-    specs: input.specs,
+    sizes: (input.sizes ?? current?.sizes ?? []).map((item) => item.trim()).filter(Boolean),
+    tags: [],
+    specs: input.specs ?? current?.specs ?? [],
     imageIds: input.imageIds,
     isPublished: input.isPublished,
     coverUrl: input.coverUrl ?? current?.coverUrl ?? null,
+    originalCoverUrl: input.originalCoverUrl ?? current?.originalCoverUrl ?? null,
+    watermarkStatus: input.watermarkStatus ?? current?.watermarkStatus ?? "none",
+    watermarkError: input.watermarkError ?? current?.watermarkError ?? null,
+    watermarkRevision: input.watermarkRevision ?? current?.watermarkRevision ?? null,
+    watermarkOverride: input.watermarkOverride ?? current?.watermarkOverride ?? null,
     sortOrder: current?.sortOrder ?? products.length + 1,
     createdAt: current?.createdAt || new Date().toISOString(),
   };
   await setDoc(doc(db(), "sg_products", id), record, { merge: true });
+  await logAudit("product", `Design ${designNumber} saved`);
   const saved = (await listProducts({ includeHidden: true })).find((item) => item.id === id);
   if (!saved) throw new Error("Could not save the product.");
   return saved;
@@ -461,20 +714,23 @@ export async function saveProduct(input: {
 
 export async function deleteProduct(id: string): Promise<void> {
   await deleteDoc(doc(db(), "sg_products", id));
+  await logAudit("product", `Product ${id} deleted`);
 }
 
 export async function getSettings(): Promise<RemoteSettings> {
   const snap = await getDoc(doc(db(), "sg_settings", "site"));
   const data = snap.exists() ? asRecord(snap.data()) : {};
   const logoId = str(data.logoId) || null;
+  const faviconId = str(data.faviconId) || null;
   const watermarkLogoId = str(data.watermarkLogoId) || null;
-  const media = await loadMediaMap([logoId ?? "", watermarkLogoId ?? ""]);
+  const media = await loadMediaMap([logoId ?? "", faviconId ?? "", watermarkLogoId ?? ""]);
   return {
     id: "site",
-    businessName: str(data.businessName, "Shagun Digital"),
+    businessName: str(data.businessName, "A.S. Exports"),
     tagline: str(data.tagline) || null,
     logoId,
     logo: logoId ? media.get(logoId) ?? null : null,
+    faviconId,
     address: str(data.address) || null,
     phone: str(data.phone) || null,
     email: str(data.email) || null,
@@ -482,12 +738,13 @@ export async function getSettings(): Promise<RemoteSettings> {
     whatsappNumber: str(data.whatsappNumber),
     whatsappGeneralMessage: str(
       data.whatsappGeneralMessage,
-      "Hello, I would like to make an enquiry regarding your designs."
+      "Hello, I would like to make an enquiry."
     ),
     whatsappProductMessage: str(
       data.whatsappProductMessage,
-      "Hello, I am interested in your product.\n\nProduct: {productName}\nDesign No.: {designNumber}\nCategory: {categoryName}"
+      "Hello, I am interested in this design.\n\nDesign No.: {designNumber}\nCategory: {categoryName}\n{productUrl}"
     ),
+    enquiryButtonLabel: str(data.enquiryButtonLabel, "Enquire on WhatsApp"),
     mapEmbedUrl: str(data.mapEmbedUrl) || null,
     mapLink: str(data.mapLink) || null,
     latitude: typeof data.latitude === "number" ? data.latitude : null,
@@ -500,12 +757,19 @@ export async function getSettings(): Promise<RemoteSettings> {
     watermarkEnabled: bool(data.watermarkEnabled, true),
     watermarkLogoId,
     watermarkLogo: watermarkLogoId ? media.get(watermarkLogoId) ?? null : null,
-    watermarkOpacity: num(data.watermarkOpacity, 0.18),
-    watermarkScale: num(data.watermarkScale, 0.22),
-    watermarkRotation: num(data.watermarkRotation, -30),
+    watermarkOpacity: num(data.watermarkOpacity, 0.16),
+    watermarkScale: num(data.watermarkScale, 0.18),
+    watermarkSpacing: num(data.watermarkSpacing, 0.08),
+    watermarkRotation: num(data.watermarkRotation, -28),
     watermarkRepetitions: num(data.watermarkRepetitions, 4),
-    siteTitle: str(data.siteTitle, "Print Design Catalogue"),
+    watermarkRevision: str(data.watermarkRevision) || "1",
+    siteTitle: str(data.siteTitle, "Product Catalogue"),
     siteDescription: str(data.siteDescription, "Browse our catalog and enquire on WhatsApp."),
+    homepageHeading: str(data.homepageHeading, ""),
+    homepageIntro: str(data.homepageIntro, ""),
+    aboutText: str(data.aboutText, ""),
+    navCatalogLabel: str(data.navCatalogLabel, "Catalog"),
+    navContactLabel: str(data.navContactLabel, "Contact"),
     defaultSort: str(data.defaultSort, "designNumber"),
   };
 }
@@ -513,43 +777,7 @@ export async function getSettings(): Promise<RemoteSettings> {
 export async function saveSettings(input: Partial<RemoteSettings>): Promise<void> {
   const { logo, watermarkLogo, id, ...rest } = input;
   await setDoc(doc(db(), "sg_settings", "site"), rest, { merge: true });
+  await logAudit("settings", "Website settings updated");
 }
 
-export async function fileToVariants(
-  file: File,
-  kind: "product" | "logo"
-): Promise<{
-  width: number;
-  height: number;
-  bytes: number;
-  variants: Record<string, string>;
-  originalData: string;
-}> {
-  const bitmap = await createImageBitmap(file);
-  const max = kind === "logo" ? 640 : 900;
-  const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
-  const width = Math.max(1, Math.round(bitmap.width * scale));
-  const height = Math.max(1, Math.round(bitmap.height * scale));
-
-  const draw = (w: number, quality: number) => {
-    const canvas = document.createElement("canvas");
-    const ratio = w / width;
-    canvas.width = Math.max(1, Math.round(width * Math.min(1, ratio)));
-    canvas.height = Math.max(1, Math.round(height * Math.min(1, ratio)));
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Could not process the image.");
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/webp", quality);
-  };
-
-  const detail = draw(kind === "logo" ? width : 900, 0.72);
-  const card = kind === "logo" ? detail : draw(560, 0.7);
-  const thumb = draw(280, 0.65);
-  return {
-    width,
-    height,
-    bytes: Math.round((detail.length * 3) / 4),
-    variants: { detail, card, thumb },
-    originalData: card,
-  };
-}
+export { fileToCleanVariants as fileToVariants } from "@/lib/watermark-client";

@@ -1,6 +1,5 @@
 import Link from "next/link";
-import type { CatalogCategory } from "@/lib/catalog";
-import type { SocialLink } from "@/lib/settings";
+import type { SocialLink } from "@/lib/site-public";
 import { MapEmbed, type MapConfig } from "@/components/public/map-embed";
 import { WhatsAppLink } from "@/components/public/whatsapp-link";
 import {
@@ -32,7 +31,7 @@ export function SiteFooter({
   email: string | null;
   whatsappNumber: string;
   whatsappHref: string | null;
-  categories: CatalogCategory[];
+  categories: Array<{ id: string; name: string; slug: string }>;
   social: SocialLink[];
   map: MapConfig;
 }) {

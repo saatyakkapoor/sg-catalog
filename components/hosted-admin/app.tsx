@@ -1,17 +1,27 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import {
+  EmailAuthProvider,
+  onAuthStateChanged,
+  reauthenticateWithCredential,
+  signInWithEmailAndPassword,
+  signOut,
+  updatePassword,
+} from "firebase/auth";
 import { getFirebaseAuth } from "@/lib/firebase-web";
 import { mediaSrc } from "@/lib/media";
+import { childrenOf, effectiveWatermark, originalImageSrc, roots, wouldCreateCycle } from "@/lib/catalog-tree";
+import { applyLogoGridWatermark, fileToCleanVariants, watermarkVariants } from "@/lib/watermark-client";
 import {
   deleteCategory,
   deleteProduct,
-  fileToVariants,
   getSettings,
+  listAudit,
   listCategories,
   listMedia,
   listProducts,
+  logAudit,
   newId,
   removeMedia,
   saveCategory,
@@ -19,6 +29,8 @@ import {
   saveProduct,
   saveSettings,
   subscribeProducts,
+  type AuditEntry,
+  type CatalogKind,
   type RemoteCategory,
   type RemoteMedia,
   type RemoteProduct,
@@ -46,7 +58,8 @@ type View =
   | { name: "categories" }
   | { name: "category"; id?: string }
   | { name: "media" }
-  | { name: "settings" };
+  | { name: "settings" }
+  | { name: "account" };
 
 function parsePath(pathname: string): View {
   const parts = pathname.replace(/\/+$/, "").split("/").filter(Boolean);
@@ -57,6 +70,7 @@ function parsePath(pathname: string): View {
   if (section === "categories") return id === "new" ? { name: "category" } : id ? { name: "category", id } : { name: "categories" };
   if (section === "media") return { name: "media" };
   if (section === "settings") return { name: "settings" };
+  if (section === "account") return { name: "account" };
   return { name: "dashboard" };
 }
 
@@ -76,6 +90,8 @@ function hrefFor(view: View): string {
       return "/admin/media/";
     case "settings":
       return "/admin/settings/";
+    case "account":
+      return "/admin/account/";
     default:
       return "/admin/";
   }
@@ -84,6 +100,18 @@ function hrefFor(view: View): string {
 function go(href: string) {
   window.history.pushState({}, "", href);
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function authMessage(error: unknown): string {
+  const code = typeof error === "object" && error && "code" in error ? String((error as { code: string }).code) : "";
+  if (code.includes("unauthorized-domain")) return "This website is not an authorized sign-in domain yet.";
+  if (code.includes("invalid-email")) return "Use the full admin email, including .local if that is the account.";
+  if (code.includes("too-many-requests")) return "Too many attempts. Wait a minute and try again.";
+  if (code.includes("network-request-failed")) return "Network error. Check your connection.";
+  if (code.includes("wrong-password") || code.includes("invalid-credential") || code.includes("user-not-found")) {
+    return "Incorrect email or password.";
+  }
+  return error instanceof Error ? error.message : "Could not sign in.";
 }
 
 export function HostedAdmin() {
@@ -95,6 +123,7 @@ export function HostedAdmin() {
   const [categories, setCategories] = useState<RemoteCategory[]>([]);
   const [media, setMedia] = useState<RemoteMedia[]>([]);
   const [settings, setSettings] = useState<RemoteSettings | null>(null);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [busy, setBusy] = useState(false);
 
   const view = useMemo(() => parsePath(path), [path]);
@@ -113,26 +142,24 @@ export function HostedAdmin() {
   }, []);
 
   async function refresh() {
-    const [nextProducts, nextCategories, nextMedia, nextSettings] = await Promise.all([
+    const [nextProducts, nextCategories, nextMedia, nextSettings, nextAudit] = await Promise.all([
       listProducts({ includeHidden: true }),
       listCategories(),
       listMedia(),
       getSettings(),
+      listAudit(8),
     ]);
     setProducts(nextProducts);
     setCategories(nextCategories);
     setMedia(nextMedia);
     setSettings(nextSettings);
+    setAudit(nextAudit);
   }
 
   useEffect(() => {
     if (!user) return;
     refresh().catch((err) => setError(err instanceof Error ? err.message : "Could not load the catalog."));
-    return subscribeProducts(
-      { includeHidden: true },
-      (items) => setProducts(items),
-      (err) => setError(err.message)
-    );
+    return subscribeProducts({ includeHidden: true }, (items) => setProducts(items), (err) => setError(err.message));
   }, [user]);
 
   useEffect(() => {
@@ -140,29 +167,25 @@ export function HostedAdmin() {
     if (user && view.name === "login") go("/admin/");
   }, [user, view.name]);
 
-  if (user === undefined) {
-    return <p className="p-8 text-sm text-ink-500">Loading admin…</p>;
-  }
+  if (user === undefined) return <p className="p-8 text-sm text-ink-500">Loading admin…</p>;
 
   return (
     <div className="min-h-screen bg-bg text-ink-800">
       {user ? (
-        <AdminChrome
-          email={user}
-          settings={settings}
-          path={path}
-        >
+        <AdminChrome email={user} settings={settings} path={path}>
           {status ? <Note ok text={status} onClose={() => setStatus(null)} /> : null}
           {error ? <Note ok={false} text={error} onClose={() => setError(null)} /> : null}
           {view.name === "dashboard" ? (
-            <Dashboard products={products} categories={categories} media={media} settings={settings} />
+            <Dashboard products={products} categories={categories} settings={settings} audit={audit} />
           ) : null}
-          {view.name === "products" ? <ProductList products={products} onStatus={setStatus} onError={setError} onRefresh={refresh} /> : null}
+          {view.name === "products" ? (
+            <ProductList products={products} onStatus={setStatus} onError={setError} onRefresh={refresh} />
+          ) : null}
           {view.name === "product" ? (
             <ProductEditor
               product={products.find((item) => item.id === view.id)}
               categories={categories}
-              media={media}
+              settings={settings}
               busy={busy}
               onBusy={setBusy}
               onStatus={setStatus}
@@ -171,12 +194,13 @@ export function HostedAdmin() {
             />
           ) : null}
           {view.name === "categories" ? (
-            <CategoryListView categories={categories} onStatus={setStatus} onError={setError} onRefresh={refresh} />
+            <CategoryTree categories={categories} onStatus={setStatus} onError={setError} onRefresh={refresh} />
           ) : null}
           {view.name === "category" ? (
             <CategoryEditor
               category={categories.find((item) => item.id === view.id)}
-              media={media}
+              categories={categories}
+              settings={settings}
               onStatus={setStatus}
               onError={setError}
               onRefresh={refresh}
@@ -186,8 +210,16 @@ export function HostedAdmin() {
             <MediaView media={media} onStatus={setStatus} onError={setError} onRefresh={refresh} />
           ) : null}
           {view.name === "settings" && settings ? (
-            <SettingsView settings={settings} media={media} onStatus={setStatus} onError={setError} onRefresh={refresh} />
+            <SettingsView
+              settings={settings}
+              products={products}
+              categories={categories}
+              onStatus={setStatus}
+              onError={setError}
+              onRefresh={refresh}
+            />
           ) : null}
+          {view.name === "account" ? <AccountView email={user} onStatus={setStatus} onError={setError} /> : null}
         </AdminChrome>
       ) : (
         <LoginView onError={setError} error={error} />
@@ -196,15 +228,7 @@ export function HostedAdmin() {
   );
 }
 
-function Note({
-  ok,
-  text,
-  onClose,
-}: {
-  ok: boolean;
-  text: string;
-  onClose: () => void;
-}) {
+function Note({ ok, text, onClose }: { ok: boolean; text: string; onClose: () => void }) {
   return (
     <div className={`mb-4 flex items-start justify-between gap-3 rounded-lg px-3 py-2 text-sm ${ok ? "note-ok" : "note-err"}`}>
       <p>{text}</p>
@@ -229,10 +253,11 @@ function AdminChrome({
   const [open, setOpen] = useState(false);
   const links = [
     { href: "/admin/", label: "Dashboard", Icon: HomeIcon },
-    { href: "/admin/categories/", label: "Categories", Icon: LayersIcon },
+    { href: "/admin/categories/", label: "Catalogue", Icon: LayersIcon },
     { href: "/admin/products/", label: "Products", Icon: GridIcon },
-    { href: "/admin/media/", label: "Media library", Icon: ImageIcon },
-    { href: "/admin/settings/", label: "Settings", Icon: SettingsIcon },
+    { href: "/admin/media/", label: "Media", Icon: ImageIcon },
+    { href: "/admin/settings/", label: "Website", Icon: SettingsIcon },
+    { href: "/admin/account/", label: "Account", Icon: SettingsIcon },
   ];
 
   return (
@@ -248,30 +273,28 @@ function AdminChrome({
       </header>
       <aside className="hidden w-64 shrink-0 flex-col justify-between border-r border-line bg-panel p-4 lg:sticky lg:top-0 lg:flex lg:h-screen">
         <div>
-          <p className="mb-6 px-3 font-display text-lg">{settings?.businessName ?? "Shagun Digital"}</p>
+          <p className="mb-6 px-3 font-display text-lg">{settings?.businessName ?? "Admin"}</p>
           <nav className="space-y-1">
             {links.map(({ href, label, Icon }) => {
               const current = path.replace(/\/+$/, "") || "/admin";
               const target = href.replace(/\/+$/, "") || "/admin";
               const active =
-                target === "/admin"
-                  ? current === "/admin"
-                  : current === target || current.startsWith(`${target}/`);
+                target === "/admin" ? current === "/admin" : current === target || current.startsWith(`${target}/`);
               return (
-              <a
-                key={href}
-                href={href}
-                onClick={(event) => {
-                  event.preventDefault();
-                  go(href);
-                }}
-                className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium hover:bg-cream-200 ${
-                  active ? "bg-cream-200 text-ink-900" : "text-ink-600"
-                }`}
-              >
-                <Icon className="h-[18px] w-[18px]" />
-                {label}
-              </a>
+                <a
+                  key={href}
+                  href={href}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    go(href);
+                  }}
+                  className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium hover:bg-cream-200 ${
+                    active ? "bg-cream-200 text-ink-900" : "text-ink-600"
+                  }`}
+                >
+                  <Icon className="h-[18px] w-[18px]" />
+                  {label}
+                </a>
               );
             })}
           </nav>
@@ -297,12 +320,7 @@ function AdminChrome({
       </aside>
       {open ? (
         <div className="fixed inset-0 z-40 lg:hidden">
-          <button
-            type="button"
-            className="absolute inset-0 bg-ink-900/50"
-            aria-label="Close menu"
-            onClick={() => setOpen(false)}
-          />
+          <button type="button" className="absolute inset-0 bg-ink-900/50" aria-label="Close menu" onClick={() => setOpen(false)} />
           <aside className="absolute inset-y-0 left-0 flex w-72 max-w-[85%] flex-col justify-between bg-panel p-4 shadow-xl">
             <nav className="space-y-1">
               {links.map(({ href, label, Icon }) => (
@@ -321,19 +339,6 @@ function AdminChrome({
                 </a>
               ))}
             </nav>
-            <div className="space-y-2 border-t border-line pt-3">
-              <ThemeToggle />
-              <a href="/" className="btn btn-outline w-full">
-                View public site
-              </a>
-              <button
-                type="button"
-                className="btn btn-outline w-full"
-                onClick={() => signOut(getFirebaseAuth())}
-              >
-                Sign out
-              </button>
-            </div>
           </aside>
         </div>
       ) : null}
@@ -359,27 +364,33 @@ function LoginView({ error, onError }: { error: string | null; onError: (value: 
           try {
             await signInWithEmailAndPassword(
               getFirebaseAuth(),
-              String(data.get("email") ?? ""),
+              String(data.get("email") ?? "").trim(),
               String(data.get("password") ?? "")
             );
-          } catch {
-            onError("Incorrect email or password.");
+          } catch (err) {
+            onError(authMessage(err));
           } finally {
             setPending(false);
           }
         }}
       >
         <h1 className="text-2xl text-ink-900">Admin sign in</h1>
-        <p className="text-sm text-ink-500">
-          Changes you make here appear on the public catalog immediately.
-        </p>
+        <p className="text-sm text-ink-500">Use your admin email. The .local address is valid here.</p>
         <label className="block">
           <span className="field-label">Email</span>
-          <input name="email" type="email" required className="field-input" defaultValue="admin@sgcatalog.local" />
+          <input
+            name="email"
+            type="text"
+            inputMode="email"
+            autoComplete="username"
+            required
+            className="field-input"
+            defaultValue="admin@sgcatalog.local"
+          />
         </label>
         <label className="block">
           <span className="field-label">Password</span>
-          <input name="password" type="password" required className="field-input" />
+          <input name="password" type="password" autoComplete="current-password" required className="field-input" />
         </label>
         {error ? <p className="text-sm text-red-700">{error}</p> : null}
         <button type="submit" className="btn btn-primary w-full" disabled={pending}>
@@ -393,25 +404,28 @@ function LoginView({ error, onError }: { error: string | null; onError: (value: 
 function Dashboard({
   products,
   categories,
-  media,
   settings,
+  audit,
 }: {
   products: RemoteProduct[];
   categories: RemoteCategory[];
-  media: RemoteMedia[];
   settings: RemoteSettings | null;
+  audit: AuditEntry[];
 }) {
+  const missing = products.filter((item) => !item.coverUrl && item.imageIds.length === 0);
+  const watermarkErrors = products.filter((item) => item.watermarkStatus === "error");
   return (
     <div>
       <h1 className="text-2xl text-ink-900">Dashboard</h1>
       <p className="mt-1 text-sm text-ink-500">
-        Manage the {settings?.businessName ?? "catalog"}. Changes appear on the public site immediately.
+        {settings?.businessName ?? "Catalogue"} — changes appear on the public site immediately.
       </p>
-      <div className="mt-6 grid gap-4 sm:grid-cols-3">
+      <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {[
           ["Products", products.length, `${products.filter((item) => item.isPublished).length} published`],
-          ["Categories", categories.length, `${categories.filter((item) => item.isPublished).length} published`],
-          ["Images", media.length, "stored on Firestore (free)"],
+          ["Collections", categories.filter((item) => item.kind === "category").length, `${categories.filter((item) => item.parentId).length} nested`],
+          ["Brands / models", categories.filter((item) => item.kind !== "category").length, `${categories.filter((item) => item.kind === "brand").length} brands`],
+          ["Needs attention", missing.length + watermarkErrors.length, `${watermarkErrors.length} watermark errors`],
         ].map(([label, value, hint]) => (
           <div key={String(label)} className="card p-5">
             <p className="text-sm text-ink-500">{label}</p>
@@ -420,14 +434,30 @@ function Dashboard({
           </div>
         ))}
       </div>
-      <div className="mt-6 flex gap-2">
+      <div className="mt-6 flex flex-wrap gap-2">
         <a href="/admin/products/new/" onClick={(event) => { event.preventDefault(); go("/admin/products/new/"); }} className="btn btn-primary">
-          <PlusIcon className="h-4 w-4" /> Add product
+          <PlusIcon className="h-4 w-4" /> Add design
         </a>
         <a href="/admin/categories/new/" onClick={(event) => { event.preventDefault(); go("/admin/categories/new/"); }} className="btn btn-outline">
-          <PlusIcon className="h-4 w-4" /> Add category
+          <PlusIcon className="h-4 w-4" /> Add collection
+        </a>
+        <a href="/admin/settings/" onClick={(event) => { event.preventDefault(); go("/admin/settings/"); }} className="btn btn-outline">
+          Website & watermarks
         </a>
       </div>
+      {audit.length > 0 ? (
+        <div className="mt-8">
+          <h2 className="text-lg">Recent changes</h2>
+          <ul className="mt-3 space-y-2">
+            {audit.map((item) => (
+              <li key={item.id} className="text-sm text-ink-500">
+                <span className="text-ink-400">{new Date(item.at).toLocaleString()} · </span>
+                {item.detail}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -449,7 +479,7 @@ function ProductList({
     if (!term) return true;
     return (
       product.designNumber.toLowerCase().includes(term) ||
-      product.name.toLowerCase().includes(term)
+      product.sizes.some((size) => size.toLowerCase().includes(term))
     );
   });
 
@@ -458,34 +488,30 @@ function ProductList({
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl">Products</h1>
-          <p className="mt-1 text-sm text-ink-400">
-            {filtered.length} of {products.length} designs
-          </p>
+          <p className="mt-1 text-sm text-ink-400">{filtered.length} of {products.length} designs</p>
         </div>
         <a href="/admin/products/new/" onClick={(event) => { event.preventDefault(); go("/admin/products/new/"); }} className="btn btn-primary">
-          <PlusIcon className="h-4 w-4" /> Add product
+          <PlusIcon className="h-4 w-4" /> Add design
         </a>
       </div>
       <input
         type="search"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="Search by SD number or name"
+        placeholder="Search design number or size"
         className="field-input mb-4 max-w-md"
-        aria-label="Search products"
       />
-      {filtered.length === 0 ? (
-        <p className="rounded-card border border-dashed border-line px-4 py-10 text-center text-sm text-ink-400">
-          No designs match that search.
-        </p>
-      ) : null}
       <ul className="space-y-2">
         {filtered.map((product) => (
           <li key={product.id} className="card flex items-center gap-3 p-3">
-            <img src={product.coverUrl || mediaSrc(product.images[0], "thumb") || ""} alt="" className="h-14 w-14 rounded-lg object-cover bg-cream-200" />
+            <img src={product.coverUrl || mediaSrc(product.images[0], "thumb") || ""} alt="" className="h-14 w-14 rounded-lg bg-cream-200 object-cover" />
             <div className="min-w-0 flex-1">
-              <p className="truncate font-semibold">{product.name}</p>
-              <p className="text-xs text-ink-400">SD {product.designNumber}{product.isPublished ? "" : " · hidden"}</p>
+              <p className="truncate font-semibold">{product.designNumber}</p>
+              <p className="text-xs text-ink-400">
+                {[product.categoryName, product.brandName, product.modelName].filter(Boolean).join(" / ") || "Unassigned"}
+                {product.isPublished ? "" : " · hidden"}
+                {product.watermarkStatus === "error" ? " · watermark error" : ""}
+              </p>
             </div>
             <a href={hrefFor({ name: "product", id: product.id })} onClick={(event) => { event.preventDefault(); go(hrefFor({ name: "product", id: product.id })); }} className="btn btn-outline !min-h-0 !py-2">
               Edit
@@ -513,10 +539,75 @@ function ProductList({
   );
 }
 
+async function uploadAsset(file: File, kind: "product" | "logo") {
+  const processed = await fileToCleanVariants(file, kind);
+  const id = newId(kind === "logo" ? "logo" : "img");
+  await saveMedia({
+    id,
+    filename: file.name,
+    originalName: file.name,
+    mimeType: "image/webp",
+    kind,
+    width: processed.width,
+    height: processed.height,
+    bytes: processed.bytes,
+    variants: JSON.stringify(processed.variants),
+    alt: null,
+    originalData: processed.originalData,
+    createdAt: new Date().toISOString(),
+  });
+  return { id, original: processed.originalData, variants: processed.variants };
+}
+
+async function stampProduct(
+  product: Pick<RemoteProduct, "id" | "designNumber" | "description" | "categoryId" | "sizes" | "imageIds" | "isPublished" | "watermarkOverride">,
+  settings: RemoteSettings,
+  categories: RemoteCategory[],
+  media: RemoteMedia[],
+  originalSrc: string,
+  imageIds: string[]
+) {
+  const mark = effectiveWatermark(product, categories, settings);
+  const variants = await watermarkVariants(originalSrc, mark);
+  await saveProduct({
+    id: product.id,
+    designNumber: product.designNumber,
+    description: product.description ?? "",
+    categoryId: product.categoryId ?? undefined,
+    sizes: product.sizes,
+    imageIds,
+    isPublished: product.isPublished,
+    coverUrl: variants.card || variants.detail,
+    originalCoverUrl: originalSrc,
+    watermarkStatus: mark.enabled && mark.logoSrc ? "ready" : "none",
+    watermarkError: null,
+    watermarkRevision: settings.watermarkRevision,
+    watermarkOverride: product.watermarkOverride,
+  });
+  const first = imageIds[0];
+  if (first) {
+    const current = media.find((item) => item.id === first);
+    await saveMedia({
+      id: first,
+      filename: current?.filename ?? `${product.designNumber}.webp`,
+      originalName: current?.originalName ?? product.designNumber,
+      mimeType: "image/webp",
+      kind: "product",
+      width: current?.width ?? 0,
+      height: current?.height ?? 0,
+      bytes: current?.bytes ?? 0,
+      variants: JSON.stringify(variants),
+      alt: product.designNumber,
+      originalData: originalSrc,
+      createdAt: current?.createdAt,
+    });
+  }
+}
+
 function ProductEditor({
   product,
   categories,
-  media,
+  settings,
   busy,
   onBusy,
   onStatus,
@@ -525,7 +616,7 @@ function ProductEditor({
 }: {
   product?: RemoteProduct;
   categories: RemoteCategory[];
-  media: RemoteMedia[];
+  settings: RemoteSettings | null;
   busy: boolean;
   onBusy: (value: boolean) => void;
   onStatus: (value: string) => void;
@@ -533,70 +624,47 @@ function ProductEditor({
   onRefresh: () => Promise<void>;
 }) {
   const [imageIds, setImageIds] = useState(product?.imageIds ?? []);
-  const [coverUrl, setCoverUrl] = useState<string | null>(product?.coverUrl ?? null);
+  const [coverUrl, setCoverUrl] = useState(product?.coverUrl ?? null);
+  const [originalCoverUrl, setOriginalCoverUrl] = useState(product?.originalCoverUrl ?? null);
+  const [sizes, setSizes] = useState(product?.sizes.join(", ") ?? "");
 
   useEffect(() => {
     setImageIds(product?.imageIds ?? []);
     setCoverUrl(product?.coverUrl ?? null);
-  }, [product?.id, product?.imageIds?.join(","), product?.coverUrl]);
+    setOriginalCoverUrl(product?.originalCoverUrl ?? null);
+    setSizes(product?.sizes.join(", ") ?? "");
+  }, [product?.id, product?.imageIds?.join(","), product?.coverUrl, product?.originalCoverUrl, product?.sizes.join(",")]);
 
-  async function uploadPhotos(files: File[], replaceMain: boolean) {
-    if (files.length === 0) return;
+  async function uploadPhotos(files: File[]) {
+    if (!settings) return;
     onBusy(true);
     try {
-      const created: string[] = [];
-      let nextCover = coverUrl;
+      let nextIds = imageIds;
+      let nextOriginal = originalCoverUrl;
       for (const [index, file] of files.entries()) {
-        const processed = await fileToVariants(file, "product");
-        if (index === 0) nextCover = processed.variants.card || processed.variants.detail || nextCover;
-        const reuseId = replaceMain && index === 0 ? imageIds[0] : undefined;
-        const id = reuseId || newId("img");
-        try {
-          await saveMedia({
-            id,
-            filename: file.name,
-            originalName: file.name,
-            mimeType: "image/webp",
-            kind: "product",
-            width: processed.width,
-            height: processed.height,
-            bytes: processed.bytes,
-            variants: JSON.stringify({
-              card: processed.variants.card,
-              thumb: processed.variants.thumb,
-              detail: processed.variants.card,
-            }),
-            alt: product?.name ?? null,
-            createdAt: new Date().toISOString(),
-          });
-        } catch {
-          // Product coverUrl is enough for the public site.
-        }
-        created.push(id);
+        const uploaded = await uploadAsset(file, "product");
+        nextIds = index === 0 ? [uploaded.id, ...nextIds.filter((id) => id !== uploaded.id)] : [...nextIds, uploaded.id];
+        if (index === 0) nextOriginal = uploaded.original;
       }
-      const nextIds = replaceMain && created[0]
-        ? [created[0], ...imageIds.filter((id) => id !== created[0])]
-        : [...created, ...imageIds.filter((id) => !created.includes(id))];
       setImageIds(nextIds);
-      setCoverUrl(nextCover);
-      if (product) {
-        await saveProduct({
-          id: product.id,
-          designNumber: product.designNumber,
-          name: product.name,
-          description: product.description ?? "",
-          categoryId: product.categoryId ?? undefined,
-          tags: product.tags,
-          specs: product.specs,
-          imageIds: nextIds,
-          isPublished: product.isPublished,
-          coverUrl: nextCover,
-        });
+      setOriginalCoverUrl(nextOriginal);
+      if (product && nextOriginal) {
+        const latest = await listMedia();
+        await stampProduct(
+          { ...product, imageIds: nextIds, sizes: sizes.split(",").map((item) => item.trim()).filter(Boolean) },
+          settings,
+          categories,
+          latest,
+          nextOriginal,
+          nextIds
+        );
+        const saved = (await listProducts({ includeHidden: true })).find((item) => item.id === product.id);
+        setCoverUrl(saved?.coverUrl ?? null);
       }
       await onRefresh();
-      onStatus(replaceMain ? "Main photo is live on the catalog." : `Uploaded ${created.length} photo(s).`);
+      onStatus("Photo saved and watermarked.");
     } catch (error) {
-      onError(error instanceof Error ? error.message : "Photo upload failed. Try a smaller image.");
+      onError(error instanceof Error ? error.message : "Photo upload failed.");
     } finally {
       onBusy(false);
     }
@@ -613,17 +681,20 @@ function ProductEditor({
           const saved = await saveProduct({
             id: product?.id,
             designNumber: String(data.get("designNumber") ?? ""),
-            name: String(data.get("name") ?? ""),
             description: String(data.get("description") ?? ""),
             categoryId: String(data.get("categoryId") ?? "") || undefined,
-            tags: String(data.get("tags") ?? "").split(",").map((tag) => tag.trim()).filter(Boolean),
-            specs: [],
+            sizes: sizes.split(",").map((item) => item.trim()).filter(Boolean),
             imageIds,
             isPublished: data.get("isPublished") === "on",
             coverUrl,
+            originalCoverUrl,
           });
+          if (settings && originalCoverUrl) {
+            const latest = await listMedia();
+            await stampProduct(saved, settings, categories, latest, originalCoverUrl, imageIds);
+          }
           await onRefresh();
-          onStatus("Product saved. It is live on the public site.");
+          onStatus("Design saved.");
           go(hrefFor({ name: "product", id: saved.id }));
         } catch (error) {
           onError(error instanceof Error ? error.message : "Could not save.");
@@ -632,31 +703,36 @@ function ProductEditor({
         }
       }}
     >
-      <h1 className="text-2xl">{product ? `Design ${product.designNumber}` : "Add product"}</h1>
+      <h1 className="text-2xl">{product ? `Design ${product.designNumber}` : "Add design"}</h1>
       <label className="block">
         <span className="field-label">Design number</span>
-        <input name="designNumber" required className="field-input" defaultValue={product?.designNumber ?? ""} />
+        <input name="designNumber" required className="field-input" defaultValue={product?.designNumber ?? ""} placeholder="1001 or any code you use" />
+        <p className="field-hint">This is the only required identifier. No prefix is added.</p>
       </label>
       <label className="block">
-        <span className="field-label">Name</span>
-        <input name="name" required className="field-input" defaultValue={product?.name ?? ""} />
-      </label>
-      <label className="block">
-        <span className="field-label">Description</span>
-        <textarea name="description" rows={4} className="field-input" defaultValue={product?.description ?? ""} />
-      </label>
-      <label className="block">
-        <span className="field-label">Category</span>
+        <span className="field-label">Collection / brand / model</span>
         <select name="categoryId" className="field-input" defaultValue={product?.categoryId ?? ""}>
-          <option value="">None</option>
-          {categories.map((category) => (
-            <option key={category.id} value={category.id}>{category.name}</option>
+          <option value="">Unassigned</option>
+          {flattenOptions(categories).map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.label}
+            </option>
           ))}
         </select>
       </label>
       <label className="block">
-        <span className="field-label">Tags (comma separated)</span>
-        <input name="tags" className="field-input" defaultValue={product?.tags.join(", ") ?? ""} />
+        <span className="field-label">Available sizes</span>
+        <input
+          className="field-input"
+          value={sizes}
+          onChange={(event) => setSizes(event.target.value)}
+          placeholder="4 × 6 ft, 5 × 7 ft, custom"
+        />
+        <p className="field-hint">Optional. Separate multiple sizes with commas.</p>
+      </label>
+      <label className="block">
+        <span className="field-label">Description</span>
+        <textarea name="description" rows={4} className="field-input" defaultValue={product?.description ?? ""} />
       </label>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" name="isPublished" defaultChecked={product?.isPublished ?? true} />
@@ -664,67 +740,36 @@ function ProductEditor({
       </label>
       <div>
         <p className="field-label">Photos</p>
-        {coverUrl ? (
-          <img src={coverUrl} alt="" className="mt-2 h-32 w-32 rounded-lg object-cover" />
-        ) : null}
-        <div className="mt-2 flex flex-wrap gap-2">
-          <label className="btn btn-primary !min-h-0 !py-2">
-            {imageIds[0] ? "Replace main photo" : "Upload photo"}
-            <input
-              type="file"
-              accept="image/*"
-              hidden
-              onChange={(event) => {
-                const files = [...(event.target.files ?? [])];
-                event.target.value = "";
-                void uploadPhotos(files, true);
-              }}
-            />
-          </label>
-          <label className="btn btn-outline !min-h-0 !py-2">
-            Add more photos
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              onChange={(event) => {
-                const files = [...(event.target.files ?? [])];
-                event.target.value = "";
-                void uploadPhotos(files, false);
-              }}
-            />
-          </label>
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {media.filter((item) => item.kind === "product").map((item) => {
-            const selected = imageIds.includes(item.id);
-            const src = mediaSrc(item, "thumb");
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() =>
-                  setImageIds((current) =>
-                    current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id]
-                  )
-                }
-                className={`overflow-hidden rounded-lg border ${selected ? "border-gold-500 ring-2 ring-gold-300" : "border-cream-300"}`}
-              >
-                {src ? <img src={src} alt="" className="h-20 w-20 object-cover" /> : null}
-              </button>
-            );
-          })}
-        </div>
+        {coverUrl ? <img src={coverUrl} alt="" className="mt-2 h-32 w-32 rounded-lg object-cover" /> : null}
+        <label className="btn btn-primary mt-2 !min-h-0 !py-2">
+          {imageIds[0] ? "Replace main photo" : "Upload photo"}
+          <input
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(event) => {
+              const files = [...(event.target.files ?? [])];
+              event.target.value = "";
+              void uploadPhotos(files);
+            }}
+          />
+        </label>
       </div>
       <button type="submit" className="btn btn-primary" disabled={busy}>
-        {busy ? "Saving…" : "Save product"}
+        {busy ? "Saving…" : "Save design"}
       </button>
     </form>
   );
 }
 
-function CategoryListView({
+function flattenOptions(categories: RemoteCategory[], parentId: string | null = null, depth = 0): Array<{ id: string; label: string }> {
+  return childrenOf(parentId, categories).flatMap((item) => [
+    { id: item.id, label: `${"— ".repeat(depth)}${item.name} (${item.kind})` },
+    ...flattenOptions(categories, item.id, depth + 1),
+  ]);
+}
+
+function CategoryTree({
   categories,
   onStatus,
   onError,
@@ -738,102 +783,217 @@ function CategoryListView({
   return (
     <div>
       <div className="mb-5 flex items-end justify-between">
-        <h1 className="text-2xl">Categories</h1>
+        <h1 className="text-2xl">Catalogue</h1>
         <a href="/admin/categories/new/" onClick={(event) => { event.preventDefault(); go("/admin/categories/new/"); }} className="btn btn-primary">
-          <PlusIcon className="h-4 w-4" /> Add category
+          <PlusIcon className="h-4 w-4" /> Add collection
         </a>
       </div>
-      <ul className="space-y-2">
-        {categories.map((category) => (
-          <li key={category.id} className="card flex items-center justify-between p-3">
-            <div>
-              <p className="font-semibold">{category.name}</p>
-              <p className="text-xs text-ink-400">{category.productCount} products</p>
-            </div>
-            <div className="flex gap-2">
-              <a href={hrefFor({ name: "category", id: category.id })} onClick={(event) => { event.preventDefault(); go(hrefFor({ name: "category", id: category.id })); }} className="btn btn-outline !min-h-0 !py-2">Edit</a>
-              <button
-                type="button"
-                className="btn btn-outline !min-h-0 !py-2"
-                onClick={async () => {
-                  if (!confirm(`Delete ${category.name}? Products stay in the catalog.`)) return;
-                  try {
-                    await deleteCategory(category.id, "unassign");
-                    await onRefresh();
-                    onStatus(`Deleted ${category.name}.`);
-                  } catch (error) {
-                    onError(error instanceof Error ? error.message : "Delete failed.");
-                  }
-                }}
-              >
-                Delete
-              </button>
-            </div>
-          </li>
-        ))}
-      </ul>
+      <TreeList
+        parentId={null}
+        categories={categories}
+        onStatus={onStatus}
+        onError={onError}
+        onRefresh={onRefresh}
+      />
     </div>
+  );
+}
+
+function TreeList({
+  parentId,
+  categories,
+  onStatus,
+  onError,
+  onRefresh,
+}: {
+  parentId: string | null;
+  categories: RemoteCategory[];
+  onStatus: (value: string) => void;
+  onError: (value: string) => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const items = childrenOf(parentId, categories);
+  if (items.length === 0 && parentId === null) {
+    return <p className="text-sm text-ink-400">No collections yet. Add a category, then nest brands or models under it.</p>;
+  }
+  return (
+    <ul className={parentId ? "ml-4 space-y-2 border-l border-line pl-4" : "space-y-2"}>
+      {items.map((item) => (
+        <li key={item.id} className="card p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold">{item.name}</p>
+              <p className="text-xs text-ink-400">
+                {item.kind} · {item.productCount} products{item.isPublished ? "" : " · hidden"}
+              </p>
+            </div>
+            <a
+              href={hrefFor({ name: "category", id: item.id })}
+              onClick={(event) => {
+                event.preventDefault();
+                go(hrefFor({ name: "category", id: item.id }));
+              }}
+              className="btn btn-outline !min-h-0 !py-2"
+            >
+              Edit
+            </a>
+            <button
+              type="button"
+              className="btn btn-outline !min-h-0 !py-2"
+              onClick={async () => {
+                if (!confirm(`Delete “${item.name}”? Nested items must be removed first. Products will be unassigned, not deleted.`)) return;
+                try {
+                  await deleteCategory(item.id, "unassign");
+                  await onRefresh();
+                  onStatus(`${item.name} deleted. Products were kept.`);
+                } catch (error) {
+                  onError(error instanceof Error ? error.message : "Could not delete.");
+                }
+              }}
+            >
+              Delete
+            </button>
+          </div>
+          <div className="mt-3">
+            <TreeList parentId={item.id} categories={categories} onStatus={onStatus} onError={onError} onRefresh={onRefresh} />
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 
 function CategoryEditor({
   category,
-  media,
+  categories,
+  settings,
   onStatus,
   onError,
   onRefresh,
 }: {
   category?: RemoteCategory;
-  media: RemoteMedia[];
+  categories: RemoteCategory[];
+  settings: RemoteSettings | null;
   onStatus: (value: string) => void;
   onError: (value: string) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const [inherit, setInherit] = useState(category?.watermarkInherit ?? true);
+
   return (
     <form
-      className="max-w-xl space-y-4"
+      className="max-w-3xl space-y-4"
       onSubmit={async (event) => {
         event.preventDefault();
         const data = new FormData(event.currentTarget);
+        const parentId = String(data.get("parentId") ?? "") || null;
+        if (category && wouldCreateCycle(category.id, parentId, categories)) {
+          onError("That parent would create a loop.");
+          return;
+        }
         try {
+          const logoFile = (data.get("logoFile") as File | null)?.size ? (data.get("logoFile") as File) : null;
+          const markFile = (data.get("watermarkFile") as File | null)?.size ? (data.get("watermarkFile") as File) : null;
+          const logo = logoFile ? await uploadAsset(logoFile, "logo") : null;
+          const mark = markFile ? await uploadAsset(markFile, "logo") : null;
           const saved = await saveCategory({
             id: category?.id,
             name: String(data.get("name") ?? ""),
             description: String(data.get("description") ?? ""),
-            imageId: String(data.get("imageId") ?? "") || undefined,
+            parentId,
+            kind: String(data.get("kind") ?? "category") as CatalogKind,
             isPublished: data.get("isPublished") === "on",
+            seoTitle: String(data.get("seoTitle") ?? ""),
+            seoDescription: String(data.get("seoDescription") ?? ""),
+            logoId: logo?.id ?? category?.logoId,
+            watermarkInherit: inherit,
+            watermarkEnabled: data.get("watermarkEnabled") === "on",
+            watermarkLogoId: mark?.id ?? category?.watermarkLogoId,
+            watermarkOpacity: Number(data.get("watermarkOpacity") || settings?.watermarkOpacity || 0.16),
+            watermarkScale: Number(data.get("watermarkScale") || settings?.watermarkScale || 0.18),
+            watermarkSpacing: Number(data.get("watermarkSpacing") || settings?.watermarkSpacing || 0.08),
+            watermarkRotation: Number(data.get("watermarkRotation") || settings?.watermarkRotation || -28),
           });
           await onRefresh();
-          onStatus("Category saved.");
+          onStatus("Collection saved. It is available in product forms and the public menu.");
           go(hrefFor({ name: "category", id: saved.id }));
         } catch (error) {
           onError(error instanceof Error ? error.message : "Could not save.");
         }
       }}
     >
-      <h1 className="text-2xl">{category ? category.name : "Add category"}</h1>
+      <h1 className="text-2xl">{category ? category.name : "Add collection"}</h1>
       <label className="block">
         <span className="field-label">Name</span>
         <input name="name" required className="field-input" defaultValue={category?.name ?? ""} />
+      </label>
+      <label className="block">
+        <span className="field-label">Type</span>
+        <select name="kind" className="field-input" defaultValue={category?.kind ?? "category"}>
+          <option value="category">Category / subcategory</option>
+          <option value="brand">Brand</option>
+          <option value="model">Model / collection</option>
+        </select>
+      </label>
+      <label className="block">
+        <span className="field-label">Nested under</span>
+        <select name="parentId" className="field-input" defaultValue={category?.parentId ?? ""}>
+          <option value="">Top level</option>
+          {flattenOptions(categories)
+            .filter((item) => item.id !== category?.id)
+            .map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.label}
+              </option>
+            ))}
+        </select>
       </label>
       <label className="block">
         <span className="field-label">Description</span>
         <textarea name="description" rows={3} className="field-input" defaultValue={category?.description ?? ""} />
       </label>
       <label className="block">
-        <span className="field-label">Cover image</span>
-        <select name="imageId" className="field-input" defaultValue={category?.imageId ?? ""}>
-          <option value="">None</option>
-          {media.map((item) => (
-            <option key={item.id} value={item.id}>{item.originalName}</option>
-          ))}
-        </select>
+        <span className="field-label">SEO title</span>
+        <input name="seoTitle" className="field-input" defaultValue={category?.seoTitle ?? ""} />
+      </label>
+      <label className="block">
+        <span className="field-label">SEO description</span>
+        <textarea name="seoDescription" rows={2} className="field-input" defaultValue={category?.seoDescription ?? ""} />
+      </label>
+      <label className="block">
+        <span className="field-label">Logo / image</span>
+        <input name="logoFile" type="file" accept="image/*" className="field-input" />
       </label>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" name="isPublished" defaultChecked={category?.isPublished ?? true} />
         Published
       </label>
-      <button type="submit" className="btn btn-primary">Save category</button>
+      <div className="card space-y-3 p-4">
+        <h2 className="text-lg">Watermark</h2>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={inherit} onChange={(event) => setInherit(event.target.checked)} />
+          Inherit from parent / website default
+        </label>
+        {!inherit ? (
+          <>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" name="watermarkEnabled" defaultChecked={category?.watermarkEnabled ?? true} />
+              Enable watermark
+            </label>
+            <label className="block">
+              <span className="field-label">Watermark image</span>
+              <input name="watermarkFile" type="file" accept="image/*" className="field-input" />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block"><span className="field-label">Opacity</span><input name="watermarkOpacity" type="number" step="0.01" className="field-input" defaultValue={category?.watermarkOpacity ?? settings?.watermarkOpacity} /></label>
+              <label className="block"><span className="field-label">Size</span><input name="watermarkScale" type="number" step="0.01" className="field-input" defaultValue={category?.watermarkScale ?? settings?.watermarkScale} /></label>
+              <label className="block"><span className="field-label">Spacing</span><input name="watermarkSpacing" type="number" step="0.01" className="field-input" defaultValue={category?.watermarkSpacing ?? settings?.watermarkSpacing} /></label>
+              <label className="block"><span className="field-label">Rotation</span><input name="watermarkRotation" type="number" className="field-input" defaultValue={category?.watermarkRotation ?? settings?.watermarkRotation} /></label>
+            </div>
+          </>
+        ) : null}
+      </div>
+      <button type="submit" className="btn btn-primary">Save collection</button>
     </form>
   );
 }
@@ -863,23 +1023,7 @@ function MediaView({
             const files = [...(event.target.files ?? [])];
             event.target.value = "";
             try {
-              for (const file of files) {
-                const processed = await fileToVariants(file, "product");
-                await saveMedia({
-                  id: newId("img"),
-                  filename: file.name,
-                  originalName: file.name,
-                  mimeType: "image/webp",
-                  kind: "product",
-                  width: processed.width,
-                  height: processed.height,
-                  bytes: processed.bytes,
-                  variants: JSON.stringify(processed.variants),
-                  alt: null,
-                  originalData: processed.originalData,
-                  createdAt: new Date().toISOString(),
-                });
-              }
+              for (const file of files) await uploadAsset(file, "product");
               await onRefresh();
               onStatus(`Uploaded ${files.length} image(s).`);
             } catch (error) {
@@ -890,7 +1034,7 @@ function MediaView({
       </label>
       <ul className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {media.map((item) => {
-          const src = mediaSrc(item, "card");
+          const src = mediaSrc(item, "card") || originalImageSrc(item);
           return (
             <li key={item.id} className="card overflow-hidden">
               {src ? <img src={src} alt={item.alt ?? item.originalName} className="aspect-square w-full object-cover" /> : null}
@@ -919,36 +1063,64 @@ function MediaView({
 
 function SettingsView({
   settings,
-  media,
+  products,
+  categories,
   onStatus,
   onError,
   onRefresh,
 }: {
   settings: RemoteSettings;
-  media: RemoteMedia[];
+  products: RemoteProduct[];
+  categories: RemoteCategory[];
   onStatus: (value: string) => void;
   onError: (value: string) => void;
   onRefresh: () => Promise<void>;
 }) {
+  const [preview, setPreview] = useState<string | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+
   return (
     <form
-      className="max-w-2xl space-y-4"
+      className="max-w-3xl space-y-4"
       onSubmit={async (event) => {
         event.preventDefault();
         const data = new FormData(event.currentTarget);
         try {
+          const logoFile = (data.get("logoFile") as File | null)?.size ? (data.get("logoFile") as File) : null;
+          const markFile = (data.get("watermarkFile") as File | null)?.size ? (data.get("watermarkFile") as File) : null;
+          const logo = logoFile ? await uploadAsset(logoFile, "logo") : null;
+          const mark = markFile ? await uploadAsset(markFile, "logo") : null;
           await saveSettings({
             businessName: String(data.get("businessName") ?? ""),
             tagline: String(data.get("tagline") ?? "") || null,
+            homepageHeading: String(data.get("homepageHeading") ?? ""),
+            homepageIntro: String(data.get("homepageIntro") ?? ""),
+            aboutText: String(data.get("aboutText") ?? ""),
             address: String(data.get("address") ?? "") || null,
             phone: String(data.get("phone") ?? "") || null,
             email: String(data.get("email") ?? "") || null,
+            footerText: String(data.get("footerText") ?? "") || null,
             whatsappNumber: String(data.get("whatsappNumber") ?? "").replace(/\D/g, ""),
             whatsappGeneralMessage: String(data.get("whatsappGeneralMessage") ?? ""),
             whatsappProductMessage: String(data.get("whatsappProductMessage") ?? ""),
+            enquiryButtonLabel: String(data.get("enquiryButtonLabel") ?? "Enquire on WhatsApp"),
             siteTitle: String(data.get("siteTitle") ?? ""),
             siteDescription: String(data.get("siteDescription") ?? ""),
-            logoId: String(data.get("logoId") ?? "") || null,
+            navCatalogLabel: String(data.get("navCatalogLabel") ?? "Catalog"),
+            navContactLabel: String(data.get("navContactLabel") ?? "Contact"),
+            instagramUrl: String(data.get("instagramUrl") ?? "") || null,
+            facebookUrl: String(data.get("facebookUrl") ?? "") || null,
+            youtubeUrl: String(data.get("youtubeUrl") ?? "") || null,
+            twitterUrl: String(data.get("twitterUrl") ?? "") || null,
+            linkedinUrl: String(data.get("linkedinUrl") ?? "") || null,
+            logoId: logo?.id ?? settings.logoId,
+            watermarkEnabled: data.get("watermarkEnabled") === "on",
+            watermarkLogoId: mark?.id ?? settings.watermarkLogoId,
+            watermarkOpacity: Number(data.get("watermarkOpacity") || 0.16),
+            watermarkScale: Number(data.get("watermarkScale") || 0.18),
+            watermarkSpacing: Number(data.get("watermarkSpacing") || 0.08),
+            watermarkRotation: Number(data.get("watermarkRotation") || -28),
+            watermarkRevision: String(Date.now()),
           });
           await onRefresh();
           onStatus("Settings saved. The public site updates immediately.");
@@ -957,10 +1129,15 @@ function SettingsView({
         }
       }}
     >
-      <h1 className="text-2xl">Settings</h1>
-      <label className="block"><span className="field-label">Business name</span><input name="businessName" className="field-input" defaultValue={settings.businessName} required /></label>
+      <h1 className="text-2xl">Website settings</h1>
+      <label className="block"><span className="field-label">Company / brand name</span><input name="businessName" className="field-input" defaultValue={settings.businessName} required /></label>
       <label className="block"><span className="field-label">Tagline</span><input name="tagline" className="field-input" defaultValue={settings.tagline ?? ""} /></label>
+      <label className="block"><span className="field-label">Homepage heading</span><input name="homepageHeading" className="field-input" defaultValue={settings.homepageHeading} /></label>
+      <label className="block"><span className="field-label">Homepage introduction</span><textarea name="homepageIntro" rows={3} className="field-input" defaultValue={settings.homepageIntro} /></label>
+      <label className="block"><span className="field-label">About / footer text</span><textarea name="aboutText" rows={3} className="field-input" defaultValue={settings.aboutText || settings.footerText || ""} /></label>
+      <label className="block"><span className="field-label">Footer text</span><textarea name="footerText" rows={2} className="field-input" defaultValue={settings.footerText ?? ""} /></label>
       <label className="block"><span className="field-label">WhatsApp number</span><input name="whatsappNumber" className="field-input" defaultValue={settings.whatsappNumber} /></label>
+      <label className="block"><span className="field-label">Enquiry button label</span><input name="enquiryButtonLabel" className="field-input" defaultValue={settings.enquiryButtonLabel} /></label>
       <label className="block"><span className="field-label">General WhatsApp message</span><textarea name="whatsappGeneralMessage" rows={3} className="field-input" defaultValue={settings.whatsappGeneralMessage} /></label>
       <label className="block"><span className="field-label">Product WhatsApp message</span><textarea name="whatsappProductMessage" rows={4} className="field-input" defaultValue={settings.whatsappProductMessage} /></label>
       <label className="block"><span className="field-label">Address</span><textarea name="address" rows={2} className="field-input" defaultValue={settings.address ?? ""} /></label>
@@ -968,16 +1145,136 @@ function SettingsView({
       <label className="block"><span className="field-label">Email</span><input name="email" className="field-input" defaultValue={settings.email ?? ""} /></label>
       <label className="block"><span className="field-label">Site title</span><input name="siteTitle" className="field-input" defaultValue={settings.siteTitle} /></label>
       <label className="block"><span className="field-label">Site description</span><textarea name="siteDescription" rows={2} className="field-input" defaultValue={settings.siteDescription} /></label>
-      <label className="block">
-        <span className="field-label">Logo</span>
-        <select name="logoId" className="field-input" defaultValue={settings.logoId ?? ""}>
-          <option value="">None</option>
-          {media.map((item) => (
-            <option key={item.id} value={item.id}>{item.originalName}</option>
-          ))}
-        </select>
-      </label>
+      <label className="block"><span className="field-label">Catalog menu label</span><input name="navCatalogLabel" className="field-input" defaultValue={settings.navCatalogLabel} /></label>
+      <label className="block"><span className="field-label">Contact menu label</span><input name="navContactLabel" className="field-input" defaultValue={settings.navContactLabel} /></label>
+      <label className="block"><span className="field-label">Instagram URL</span><input name="instagramUrl" className="field-input" defaultValue={settings.instagramUrl ?? ""} /></label>
+      <label className="block"><span className="field-label">Facebook URL</span><input name="facebookUrl" className="field-input" defaultValue={settings.facebookUrl ?? ""} /></label>
+      <label className="block"><span className="field-label">YouTube URL</span><input name="youtubeUrl" className="field-input" defaultValue={settings.youtubeUrl ?? ""} /></label>
+      <label className="block"><span className="field-label">X / Twitter URL</span><input name="twitterUrl" className="field-input" defaultValue={settings.twitterUrl ?? ""} /></label>
+      <label className="block"><span className="field-label">LinkedIn URL</span><input name="linkedinUrl" className="field-input" defaultValue={settings.linkedinUrl ?? ""} /></label>
+      <label className="block"><span className="field-label">Company logo</span><input name="logoFile" type="file" accept="image/*" className="field-input" /></label>
+      <div className="card space-y-3 p-4">
+        <h2 className="text-lg">Default watermark</h2>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="watermarkEnabled" defaultChecked={settings.watermarkEnabled} />
+          Enable watermark
+        </label>
+        <label className="block"><span className="field-label">Watermark logo</span><input name="watermarkFile" type="file" accept="image/*" className="field-input" /></label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block"><span className="field-label">Opacity</span><input name="watermarkOpacity" type="number" step="0.01" className="field-input" defaultValue={settings.watermarkOpacity} /></label>
+          <label className="block"><span className="field-label">Size</span><input name="watermarkScale" type="number" step="0.01" className="field-input" defaultValue={settings.watermarkScale} /></label>
+          <label className="block"><span className="field-label">Spacing</span><input name="watermarkSpacing" type="number" step="0.01" className="field-input" defaultValue={settings.watermarkSpacing} /></label>
+          <label className="block"><span className="field-label">Rotation</span><input name="watermarkRotation" type="number" className="field-input" defaultValue={settings.watermarkRotation} /></label>
+        </div>
+        <button
+          type="button"
+          className="btn btn-outline"
+          onClick={async () => {
+            const sample = products.find((item) => item.originalCoverUrl || item.coverUrl);
+            const src = sample?.originalCoverUrl || sample?.coverUrl;
+            if (!src) {
+              onError("Upload a product photo first to preview.");
+              return;
+            }
+            const mark = effectiveWatermark(sample ?? null, categories, settings);
+            setPreview(await applyLogoGridWatermark(src, mark));
+          }}
+        >
+          Preview watermark
+        </button>
+        {preview ? <img src={preview} alt="Watermark preview" className="max-w-xs rounded-lg border border-line" /> : null}
+        <button
+          type="button"
+          className="btn btn-outline"
+          disabled={regenerating}
+          onClick={async () => {
+            setRegenerating(true);
+            try {
+              const latestMedia = await listMedia();
+              const latestSettings = await getSettings();
+              let done = 0;
+              for (const product of products) {
+                const original =
+                  product.originalCoverUrl ||
+                  originalImageSrc(product.images[0]) ||
+                  product.coverUrl;
+                if (!original) continue;
+                await stampProduct(product, latestSettings, categories, latestMedia, original, product.imageIds);
+                done += 1;
+              }
+              await logAudit("watermark", `Regenerated ${done} product image(s)`);
+              await onRefresh();
+              onStatus(`Regenerated watermarks on ${done} design(s).`);
+            } catch (error) {
+              onError(error instanceof Error ? error.message : "Regeneration failed.");
+            } finally {
+              setRegenerating(false);
+            }
+          }}
+        >
+          {regenerating ? "Regenerating…" : "Regenerate existing product watermarks"}
+        </button>
+      </div>
       <button type="submit" className="btn btn-primary">Save settings</button>
+    </form>
+  );
+}
+
+function AccountView({
+  email,
+  onStatus,
+  onError,
+}: {
+  email: string;
+  onStatus: (value: string) => void;
+  onError: (value: string | null) => void;
+}) {
+  const [pending, setPending] = useState(false);
+  return (
+    <form
+      className="card max-w-md space-y-4 p-6"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        const data = new FormData(event.currentTarget);
+        const current = String(data.get("current") ?? "");
+        const next = String(data.get("next") ?? "");
+        const confirm = String(data.get("confirm") ?? "");
+        if (next.length < 8) {
+          onError("New password must be at least 8 characters.");
+          return;
+        }
+        if (next !== confirm) {
+          onError("New password and confirmation do not match.");
+          return;
+        }
+        const user = getFirebaseAuth().currentUser;
+        if (!user?.email) {
+          onError("Sign in again before changing the password.");
+          return;
+        }
+        setPending(true);
+        onError(null);
+        try {
+          const cred = EmailAuthProvider.credential(user.email, current);
+          await reauthenticateWithCredential(user, cred);
+          await updatePassword(user, next);
+          onStatus("Password updated. Use the new password next time you sign in.");
+          event.currentTarget.reset();
+        } catch (error) {
+          onError(authMessage(error));
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      <h1 className="text-2xl">Account</h1>
+      <p className="text-sm text-ink-500">Signed in as {email}. Passwords are stored only in Firebase Authentication.</p>
+      <label className="block"><span className="field-label">Current password</span><input name="current" type="password" required className="field-input" /></label>
+      <label className="block"><span className="field-label">New password</span><input name="next" type="password" required className="field-input" /></label>
+      <label className="block"><span className="field-label">Confirm new password</span><input name="confirm" type="password" required className="field-input" /></label>
+      <button type="submit" className="btn btn-primary" disabled={pending}>
+        {pending ? "Updating…" : "Change password"}
+      </button>
     </form>
   );
 }
